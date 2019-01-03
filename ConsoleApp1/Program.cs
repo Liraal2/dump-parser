@@ -3,32 +3,78 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using System.Threading;
 
 namespace ConsoleApp1
 {
     class Program
     {
+        public static string article { get; private set; }
+
         static void Main(string[] args)
         {
             XElement dump = XElement.Load(Path.Combine(Directory.GetCurrentDirectory(), "dump.xml"));
-            IEnumerable<string> articles = dump.Descendants().Where(e => e.Name.LocalName == "text").Select(e=>e.Value);
+            IEnumerable<string> articles = dump.Descendants().Where(e => e.Name.LocalName == "text").Select(e=>e.Value);//.ToList().GetRange(0,3);
 
-            var ignored = new List<string>{ "File" };
+            var ignored = new List<string>{ "File", "Wikipedia", "Category", "Special", "Image", "User",
+                "http", "https", "template","talk", "help", "module", "mediaWiki", "jpg", "px", "span" };
             foreach (string i in ignored) articles = articles.ToList().Select(a => Regex.Replace(a, string.Format(@"\[\[{0}:.+\|", i), ""));
-            
-            var cleanArticles = articles;
-            cleanArticles = cleanArticles.ToList().Select(a => Regex.Replace(a, @"\[\[|\]\]|{.+}|<.+>|\||===.+===", "")+"|");
-            File.WriteAllLines("clean.csv", cleanArticles.ToArray());
+
+            new Thread(() => {
+                var cleanArticles = articles;
+                cleanArticles = cleanArticles.ToList().Select(a => Regex.Replace(a, @"\[\[|\]\]|{.+}|<.+>|\||===.+===|==.+==|\r|\n|\r\n|,|\(|\)|-|&lt;.*&gt;|\[http.*\]", "")+"|");
+                var cleanArticlesArray = string.Join("", cleanArticles.ToArray()).Split('.');
+                File.WriteAllLines("clean.csv", cleanArticlesArray);
+            }).Start();
             
             var markedArticles = articles;
-            markedArticles = markedArticles.ToList().Select(a => Regex.Replace(a, @"{.+}", "") + "|");
+            markedArticles = markedArticles.ToList().Select(a => Regex.Replace(a, @"{.+}|\[\[\|\]\]", "") + "|");
             var lemmatizer = new LemmaSharp.LemmatizerPrebuiltCompact(LemmaSharp.LanguagePrebuilt.English);
-            markedArticles = markedArticles.ToList().Select(a => Regex.Replace(a, @"\[\[.+?\]\]", delegate (Match m)
+
+            var linkForms = Enumerable.Range(0,10).Select((i)=>new HashSet<string>()).ToArray();
+            markedArticles = markedArticles.ToList().Select(a => Regex.Replace(a, @"\[\[.+?\]\]\w*", delegate (Match m)
             {
-                return "{"+lemmatizer.Lemmatize(Regex.Replace(m.Value, @"\[\[|\]\]|.*\|", "")) +"}";
+                var len = m.Value.Split().Count();
+                var val = Regex.Replace(m.Value, @"\[\[", "").Split(new char[]{'|'},System.StringSplitOptions.RemoveEmptyEntries).First();
+                var fragments = val.Split(new string[]{"]]" },System.StringSplitOptions.RemoveEmptyEntries);
+                linkForms[len < 10 ? len - 1 : 9].Add(fragments.First().ToLower());
+                linkForms[len < 10 ? len - 1 : 9].Add(string.Join("", fragments).ToLower());
+                return "{"+lemmatizer.Lemmatize(fragments.First()) +"}";
             }));
-            markedArticles = markedArticles.ToList().Select(a => Regex.Replace(a, @"\[\[|\]\]|<.+>|\||===.+===", "")+"|");
-            File.WriteAllLines("marked.csv", markedArticles.ToArray());
+            markedArticles = markedArticles.ToList().Select(a => Regex.Replace(a, @"\[\[|\]\]|<.+>|\||===.+===|==.+==|\r|\n|\r\n|,|\(|\)|-|\[http.*\]|&lt;.*&gt;", "")+"|");
+            var markedArticlesArray = string.Join("", markedArticles.ToArray()).Split('.');
+            markedArticles = null;
+            dump = null;
+            articles = null;
+            ///magic happens here
+            for(int a = 0; a < markedArticlesArray.Count(); a++)
+            {
+                markedArticlesArray[a] = Regex.Replace(markedArticlesArray[a], @"\?|\!|:|-|=", " ");
+                var articleList = markedArticlesArray[a].Split(' ').ToList();
+                foreach(var subset in linkForms.Reverse())
+                {
+                    if (subset.Count == 0) continue;
+                    var len = System.Array.IndexOf(linkForms, subset)+1;
+                    var validityCounter = 0;
+                    for(int i = 0; i < articleList.Count-len+1; i++)
+                    {
+                        var substring = string.Join(" ", articleList.GetRange(i, len));
+                        validityCounter = validityCounter + articleList.ElementAt(i).Split('{').Length - articleList.ElementAt(i).Split('}').Length;
+                        if (validityCounter == 0 && subset.Contains(substring.ToLower()))
+                        {
+                            var marked = '{'+lemmatizer.Lemmatize(substring)+'}';
+                            var list = articleList.GetRange(0, i);
+                            list.AddRange(marked.Split(' '));
+                            if(i+len < articleList.Count) list.AddRange(articleList.GetRange(i + len, articleList.Count - i - len));
+                            articleList = list;
+                            if (len > 1) validityCounter++;
+                        }
+                    }
+                }
+                markedArticlesArray[a] = string.Join(" ", articleList);
+            }
+
+            File.WriteAllLines("marked.csv", markedArticlesArray);
         }
     }
 }
